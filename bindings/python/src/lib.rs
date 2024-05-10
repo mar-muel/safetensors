@@ -17,7 +17,7 @@ use std::iter::FromIterator;
 use std::ops::Bound;
 use pyo3::{Bound as PyBound};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 static TORCH_MODULE: GILOnceCell<Py<PyModule>> = GILOnceCell::new();
 static NUMPY_MODULE: GILOnceCell<Py<PyModule>> = GILOnceCell::new();
@@ -323,6 +323,11 @@ enum Storage {
     TorchStorage(GILOnceCell<PyObject>),
 }
 
+enum WriteStorage {
+    MmapMut(MmapMut),
+}
+
+
 #[derive(Debug, PartialEq, Eq, PartialOrd)]
 struct Version {
     major: u8,
@@ -597,145 +602,6 @@ impl Open {
         }
     }
 
-    /// Overwrite a tensor
-    pub fn set_tensor(&self, name: &str, value: &PyDict) -> PyResult<()> {
-        Python::with_gil(|py| {
-            let mut shape: Option<Vec<usize>> = None;
-            let mut dtype: Option<Dtype> = None;
-            let mut data: Option<&[u8]> = None;
-            for (key, val) in value {
-                let key: &str = key.extract()?;
-                match key {
-                    "shape" => shape = val.extract()?,
-                    "dtype" => {
-                        let val: &str = val.extract()?;
-                        dtype = match val {
-                            "bool" => Some(Dtype::BOOL),
-                            "int8" => Some(Dtype::I8),
-                            "uint8" => Some(Dtype::U8),
-                            "int16" => Some(Dtype::I16),
-                            "uint16" => Some(Dtype::U16),
-                            "int32" => Some(Dtype::I32),
-                            "uint32" => Some(Dtype::U32),
-                            "int64" => Some(Dtype::I64),
-                            "uint64" => Some(Dtype::U64),
-                            "float16" => Some(Dtype::F16),
-                            "float32" => Some(Dtype::F32),
-                            "float64" => Some(Dtype::F64),
-                            "bfloat16" => Some(Dtype::BF16),
-                            "float8_e4m3fn" => Some(Dtype::F8_E4M3),
-                            "float8_e5m2" => Some(Dtype::F8_E5M2),
-                            dtype_str => {
-                                return Err(SafetensorError::new_err(format!(
-                                            "dtype {dtype_str} is not covered",
-                                            )));
-                            }
-                        }
-                    }
-                    "data" => data = Some(val.extract::<&[u8]>()?),
-                    _ => println!("Ignored unknown kwarg option {key}"),
-                };
-            }
-            let shape = shape.ok_or_else(|| {
-                SafetensorError::new_err(format!("Missing `shape` in {value:?}"))
-            })?;
-            let dtype = dtype.ok_or_else(|| {
-                SafetensorError::new_err(format!("Missing `dtype` in {value:?}"))
-            })?;
-            let data = data.ok_or_else(|| {
-                SafetensorError::new_err(format!("Missing `data` in {value:?}"))
-            })?;
-
-            // Fetch metadata
-            let info = self.metadata.info(name).ok_or_else(|| {
-                SafetensorError::new_err(format!("File does not contain tensor {name}"))
-            })?;
-
-            // Validate dtype and shape
-            if info.dtype != dtype {
-                return Err(SafetensorError::new_err(format!(
-                    "Dtype mismatch: existing dtype is {:?}, new dtype is {:?}",
-                    info.dtype, dtype
-                )));
-            }
-            if info.shape != shape {
-                return Err(SafetensorError::new_err(format!(
-                    "Shape mismatch: existing shape is {:?}, new shape is {:?}",
-                    info.shape, shape
-                )));
-            }
-
-            // Validate data size
-            let data_size = data.len();
-            let expected_size = info.data_offsets.1 - info.data_offsets.0;
-            if data_size != expected_size {
-                return Err(SafetensorError::new_err(format!(
-                            "Data size mismatch: expected size is {}, new data size is {}",
-                            expected_size, data_size
-                            )));
-            }
-
-            let tensor = TensorView::new(dtype, shape.clone(), data)
-                .map_err(|e| SafetensorError::new_err(format!("Error preparing tensor view: {e:?}")))?;
-
-            let file = OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open("/Users/martin/projects/playground/safetensors/bindings/python/model.safetensors")?;
-
-            let mut mmap = unsafe { MmapOptions::new().map_mut(&file)? };
-            mmap[self.offset + info.data_offsets.0..self.offset + info.data_offsets.1].copy_from_slice(tensor.data().as_ref());
-            mmap.flush();
-
-
-            // match &self.storage.as_ref() {
-            //     Storage::Mmap(mmap) => {
-            //         // We need mutable access to the mmap here, so a bit of unsafe might be involved or another approach
-            //         // to obtain a mutable reference if the storage type allows for it.
-            //         // let mmap = Arc::get_mut(&mut self.storage.clone()).ok_or_else(|| {
-            //         //     SafetensorError::new_err("Unable to get mutable reference to mmap storage")
-            //         // })?;
-            //         // Assuming mmap allows mutable access:
-            //         // let mmap = unsafe { &mut *(mmap as *mut MmapMut) };
-            //         mmap[info.data_offsets.0..info.data_offsets.1].copy_from_slice(data);
-            //         // mmap.flush()?;
-            //     },
-            //     Storage::TorchStorage(gil_cell) => {
-            //         todo!()
-            //         // Handle PyTorch storage case
-            //         // This may involve calling PyTorch's specific file writing functions
-            //         // via Python C API or PyO3 if needed, or adjusting this case based on
-            //         // how the storage is handled for Torch.
-            //         // As of now, let's assume we need to open a Python context:
-            //         // Python::with_gil(|py| {
-            //         //     let torch_storage = gil_cell.get(py).ok_or_else(|| {
-            //         //         SafetensorError::new_err("Failed to get PyTorch storage")
-            //         //     })?;
-            //         //     // Further operations depend on PyTorch's API for updating tensors
-            //         // })?;
-            //     }
-            // }
-
-            // // overwrite tensor
-            // let mut file = OpenOptions::new()
-            //     .read(true)
-            //     .write(true)
-            //     .open(&self.file_path)?;
-            //
-            // // Position the file cursor at the start of the tensor data
-            // file.seek(SeekFrom::Start(info.data_offsets.0 as u64))?;
-            //
-            // let mut writer = BufWriter::new(file);
-            // writer.write_all(data)?;
-            // writer.flush()?;
-
-            println!("Tensor key: {}, Shape: {:?}, Dtype: {:?}", name, shape, dtype);
-            println!("Offsets: {} to {}", info.data_offsets.0, info.data_offsets.1);
-            println!("Offsets: {}", self.offset);
-
-            Ok(())
-        })
-    }
 
     /// Returns a full slice view object
     ///
@@ -848,6 +714,260 @@ impl safe_open {
         self.inner()?.get_tensor(name)
     }
 
+    /// Returns a full slice view object
+    ///
+    /// Args:
+    ///     name (`str`):
+    ///         The name of the tensor you want
+    ///
+    /// Returns:
+    ///     (`PySafeSlice`):
+    ///         A dummy object you can slice into to get a real tensor
+    /// Example:
+    /// ```python
+    /// from safetensors import safe_open
+    ///
+    /// with safe_open("model.safetensors", framework="pt", device=0) as f:
+    ///     tensor_part = f.get_slice("embedding")[:, ::8]
+    ///
+    /// ```
+    pub fn get_slice(&self, name: &str) -> PyResult<PySafeSlice> {
+        self.inner()?.get_slice(name)
+    }
+
+    pub fn __enter__(slf: Py<Self>) -> Py<Self> {
+        slf
+    }
+
+    pub fn __exit__(&mut self, _exc_type: PyObject, _exc_value: PyObject, _traceback: PyObject) {
+        self.inner = None;
+    }
+}
+
+struct SafeWrite {
+    metadata: Metadata,
+    offset: usize,
+    storage: Arc<Mutex<WriteStorage>>,
+}
+
+impl SafeWrite {
+    fn new(filename: PathBuf, framework: Framework, device: Option<Device>) -> PyResult<Self> {
+        let file = OpenOptions::new().read(true) .write(true).open(&filename).map_err(|_| {
+            PyFileNotFoundError::new_err(format!("No such file or directory: {filename:?}"))
+        })?;
+        let device = device.unwrap_or(Device::Cpu);
+
+        if device != Device::Cpu && framework != Framework::Pytorch {
+            return Err(SafetensorError::new_err(format!(
+                "Device {device:?} is not support for framework {framework:?}",
+            )));
+        }
+
+        // SAFETY: Mmap is used to prevent allocating in Rust
+        // before making a copy within Python.
+        let buffer = unsafe { MmapOptions::new().map_mut(&file)? };
+
+        let (n, metadata) = SafeTensors::read_metadata(&buffer).map_err(|e| {
+            SafetensorError::new_err(format!("Error while deserializing header: {e:?}"))
+        })?;
+
+        let offset = n + 8;
+
+        Python::with_gil(|py| -> PyResult<()> {
+            match framework {
+                Framework::Pytorch => {
+                    let module = PyModule::import_bound(py, intern!(py, "torch"))?;
+                    TORCH_MODULE.get_or_init(py, || module.into())
+                }
+                _ => {
+                    let module = PyModule::import_bound(py, intern!(py, "numpy"))?;
+                    NUMPY_MODULE.get_or_init(py, || module.into())
+                }
+            };
+
+            Ok(())
+        })?;
+
+        let storage = match &framework {
+            Framework::Pytorch => todo!(),
+            _ => WriteStorage::MmapMut(buffer),
+        };
+
+        let storage = Arc::new(Mutex::new(storage));
+
+        Ok(Self {
+            metadata,
+            offset,
+            storage,
+        })
+    }
+
+    /// Return the special non tensor information in the header
+    ///
+    /// Returns:
+    ///     (`Dict[str, str]`):
+    ///         The freeform metadata.
+    pub fn metadata(&self) -> Option<HashMap<String, String>> {
+        self.metadata.metadata().clone()
+    }
+
+    /// Returns the names of the tensors in the file.
+    ///
+    /// Returns:
+    ///     (`List[str]`):
+    ///         The name of the tensors contained in that file
+    pub fn keys(&self) -> PyResult<Vec<String>> {
+        let mut keys: Vec<String> = self.metadata.tensors().keys().cloned().collect();
+        keys.sort();
+        Ok(keys)
+    }
+
+
+    /// Overwrite a tensor
+    pub fn set_tensor(&self, name: &str, value: &PyDict) -> PyResult<()> {
+        Python::with_gil(|_| {
+            let mut shape: Option<Vec<usize>> = None;
+            let mut dtype: Option<Dtype> = None;
+            let mut data: Option<&[u8]> = None;
+            for (key, val) in value {
+                let key: &str = key.extract()?;
+                match key {
+                    "shape" => shape = val.extract()?,
+                    "dtype" => {
+                        let val: &str = val.extract()?;
+                        dtype = match val {
+                            "bool" => Some(Dtype::BOOL),
+                            "int8" => Some(Dtype::I8),
+                            "uint8" => Some(Dtype::U8),
+                            "int16" => Some(Dtype::I16),
+                            "uint16" => Some(Dtype::U16),
+                            "int32" => Some(Dtype::I32),
+                            "uint32" => Some(Dtype::U32),
+                            "int64" => Some(Dtype::I64),
+                            "uint64" => Some(Dtype::U64),
+                            "float16" => Some(Dtype::F16),
+                            "float32" => Some(Dtype::F32),
+                            "float64" => Some(Dtype::F64),
+                            "bfloat16" => Some(Dtype::BF16),
+                            "float8_e4m3fn" => Some(Dtype::F8_E4M3),
+                            "float8_e5m2" => Some(Dtype::F8_E5M2),
+                            dtype_str => {
+                                return Err(SafetensorError::new_err(format!(
+                                            "dtype {dtype_str} is not covered",
+                                            )));
+                            }
+                        }
+                    }
+                    "data" => data = Some(val.extract::<&[u8]>()?),
+                    _ => println!("Ignored unknown kwarg option {key}"),
+                };
+            }
+            let shape = shape.ok_or_else(|| {
+                SafetensorError::new_err(format!("Missing `shape` in {value:?}"))
+            })?;
+            let dtype = dtype.ok_or_else(|| {
+                SafetensorError::new_err(format!("Missing `dtype` in {value:?}"))
+            })?;
+            let data = data.ok_or_else(|| {
+                SafetensorError::new_err(format!("Missing `data` in {value:?}"))
+            })?;
+
+            // Fetch metadata
+            let info = self.metadata.info(name).ok_or_else(|| {
+                SafetensorError::new_err(format!("File does not contain tensor {name}"))
+            })?;
+
+            // Validate dtype and shape
+            if info.dtype != dtype {
+                return Err(SafetensorError::new_err(format!(
+                    "Dtype mismatch: existing dtype is {:?}, new dtype is {:?}",
+                    info.dtype, dtype
+                )));
+            }
+            if info.shape != shape {
+                return Err(SafetensorError::new_err(format!(
+                    "Shape mismatch: existing shape is {:?}, new shape is {:?}",
+                    info.shape, shape
+                )));
+            }
+
+            // Validate data size
+            let data_size = data.len();
+            let expected_size = info.data_offsets.1 - info.data_offsets.0;
+            if data_size != expected_size {
+                return Err(SafetensorError::new_err(format!(
+                            "Data size mismatch: expected size is {}, new data size is {}",
+                            expected_size, data_size
+                            )));
+            }
+
+            let tensor = TensorView::new(dtype, shape.clone(), data)
+                .map_err(|e| SafetensorError::new_err(format!("Error preparing tensor view: {e:?}")))?;
+
+            match &mut *self.storage.lock().unwrap() {
+                WriteStorage::MmapMut(mmap) => {
+                    let start = self.offset + info.data_offsets.0;
+                    let end = self.offset + info.data_offsets.1;
+                    mmap[start..end].copy_from_slice(tensor.data().as_ref());
+                    mmap.flush()?;
+                },
+            }
+
+            // println!("Tensor key: {}, Shape: {:?}, Dtype: {:?}", name, shape, dtype);
+            // println!("Offsets: {} to {}", info.data_offsets.0, info.data_offsets.1);
+            // println!("Offsets: {}", self.offset);
+
+            Ok(())
+        })
+    }
+}
+
+
+
+#[pyclass]
+#[allow(non_camel_case_types)]
+struct safe_write {
+    inner: Option<SafeWrite>,
+}
+
+impl safe_write {
+    fn inner(&self) -> PyResult<&SafeWrite> {
+        let inner = self
+            .inner
+            .as_ref()
+            .ok_or_else(|| SafetensorError::new_err("File is closed".to_string()))?;
+        Ok(inner)
+    }
+}
+
+
+#[pymethods]
+impl safe_write {
+    #[new]
+    #[pyo3(text_signature = "(self, filename, framework, device=\"cpu\")")]
+    fn new(filename: PathBuf, framework: Framework, device: Option<Device>) -> PyResult<Self> {
+        let inner = Some(SafeWrite::new(filename, framework, device)?);
+        Ok(Self { inner })
+    }
+
+    /// Return the special non tensor information in the header
+    ///
+    /// Returns:
+    ///     (`Dict[str, str]`):
+    ///         The freeform metadata.
+    pub fn metadata(&self) -> PyResult<Option<HashMap<String, String>>> {
+        Ok(self.inner()?.metadata())
+    }
+
+    /// Returns the names of the tensors in the file.
+    ///
+    /// Returns:
+    ///     (`List[str]`):
+    ///         The name of the tensors contained in that file
+    pub fn keys(&self) -> PyResult<Vec<String>> {
+        self.inner()?.keys()
+    }
+
     /// Overwrite a tensor
     ///
     /// Args:
@@ -868,27 +988,6 @@ impl safe_open {
     /// ```
     pub fn set_tensor(&self, name: &str, val: &PyDict) -> PyResult<()> {
         self.inner()?.set_tensor(name, val)
-    }
-
-    /// Returns a full slice view object
-    ///
-    /// Args:
-    ///     name (`str`):
-    ///         The name of the tensor you want
-    ///
-    /// Returns:
-    ///     (`PySafeSlice`):
-    ///         A dummy object you can slice into to get a real tensor
-    /// Example:
-    /// ```python
-    /// from safetensors import safe_open
-    ///
-    /// with safe_open("model.safetensors", framework="pt", device=0) as f:
-    ///     tensor_part = f.get_slice("embedding")[:, ::8]
-    ///
-    /// ```
-    pub fn get_slice(&self, name: &str) -> PyResult<PySafeSlice> {
-        self.inner()?.get_slice(name)
     }
 
     pub fn __enter__(slf: Py<Self>) -> Py<Self> {
@@ -1261,6 +1360,7 @@ fn _safetensors_rust(m: &PyBound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(serialize_file, m)?)?;
     m.add_function(wrap_pyfunction!(deserialize, m)?)?;
     m.add_class::<safe_open>()?;
+    m.add_class::<safe_write>()?;
     m.add("SafetensorError", m.py().get_type_bound::<SafetensorError>())?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())

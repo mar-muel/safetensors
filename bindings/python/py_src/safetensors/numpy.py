@@ -4,7 +4,7 @@ from typing import Dict, Optional, Union
 
 import numpy as np
 
-from safetensors import deserialize, safe_open, serialize, serialize_file
+from safetensors import deserialize, safe_open, serialize, serialize_file, safe_write
 
 
 def _tobytes(tensor: np.ndarray) -> bytes:
@@ -174,3 +174,10 @@ def _is_little_endian(tensor: np.ndarray) -> bool:
     elif byteorder == ">":
         return False
     raise ValueError(f"Unexpected byte order {byteorder}")
+
+
+def save_tensors(tensor_dict: Dict[str, np.ndarray], filename: Union[str, os.PathLike]) -> None:
+    for k, v in tensor_dict.items():
+        with safe_write(filename, framework="np", device="cpu") as f:
+            data = {"dtype": v.dtype.name, "shape": v.shape, "data": _tobytes(v)}
+            f.set_tensor(k, data)
