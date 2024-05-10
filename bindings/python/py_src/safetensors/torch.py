@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 import torch
 
-from safetensors import deserialize, safe_open, serialize, serialize_file
+from safetensors import deserialize, safe_open, serialize, serialize_file, safe_write
 
 
 def storage_ptr(tensor: torch.Tensor) -> int:
@@ -493,3 +493,9 @@ def _flatten(tensors: Dict[str, torch.Tensor]) -> Dict[str, Dict[str, Any]]:
         }
         for k, v in tensors.items()
     }
+
+def save_tensors(tensor_dict: Dict[str, torch.Tensor], filename: Union[str, os.PathLike]) -> None:
+    for k, v in tensor_dict.items():
+        with safe_write(filename, framework="pt") as f:
+            data = {"dtype": str(v.dtype).split(".")[-1], "shape": v.shape, "data": _tobytes(v, k)}
+            f.set_tensor(k, data)

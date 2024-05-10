@@ -751,17 +751,10 @@ struct SafeWrite {
 }
 
 impl SafeWrite {
-    fn new(filename: PathBuf, framework: Framework, device: Option<Device>) -> PyResult<Self> {
+    fn new(filename: PathBuf, framework: Framework) -> PyResult<Self> {
         let file = OpenOptions::new().read(true) .write(true).open(&filename).map_err(|_| {
             PyFileNotFoundError::new_err(format!("No such file or directory: {filename:?}"))
         })?;
-        let device = device.unwrap_or(Device::Cpu);
-
-        if device != Device::Cpu && framework != Framework::Pytorch {
-            return Err(SafetensorError::new_err(format!(
-                "Device {device:?} is not support for framework {framework:?}",
-            )));
-        }
 
         // SAFETY: Mmap is used to prevent allocating in Rust
         // before making a copy within Python.
@@ -788,12 +781,12 @@ impl SafeWrite {
             Ok(())
         })?;
 
-        let storage = match &framework {
-            Framework::Pytorch => todo!(),
-            _ => WriteStorage::MmapMut(buffer),
-        };
+        // let storage = match &framework {
+        //     Framework::Pytorch => todo!(),
+        //     _ => WriteStorage::MmapMut(buffer),
+        // };
 
-        let storage = Arc::new(Mutex::new(storage));
+        let storage = Arc::new(Mutex::new(WriteStorage::MmapMut(buffer)));
 
         Ok(Self {
             metadata,
@@ -944,9 +937,9 @@ impl safe_write {
 #[pymethods]
 impl safe_write {
     #[new]
-    #[pyo3(text_signature = "(self, filename, framework, device=\"cpu\")")]
-    fn new(filename: PathBuf, framework: Framework, device: Option<Device>) -> PyResult<Self> {
-        let inner = Some(SafeWrite::new(filename, framework, device)?);
+    #[pyo3(text_signature = "(self, filename, framework)")]
+    fn new(filename: PathBuf, framework: Framework) -> PyResult<Self> {
+        let inner = Some(SafeWrite::new(filename, framework)?);
         Ok(Self { inner })
     }
 
