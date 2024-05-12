@@ -1,6 +1,6 @@
 #![deny(missing_docs)]
 //! Dummy doc
-use memmap2::{Mmap, MmapOptions, MmapMut};
+use memmap2::{Mmap, MmapOptions};
 use pyo3::exceptions::{PyException, PyFileNotFoundError};
 use pyo3::sync::GILOnceCell;
 use pyo3::prelude::*;
@@ -869,12 +869,8 @@ impl SafeWrite {
                             )));
             }
 
-            let tensor = TensorView::new(dtype, shape.clone(), data)
-                .map_err(|e| SafetensorError::new_err(format!("Error preparing tensor view: {e:?}")))?;
-
             // overwrite tensor in file
             let start = self.offset + info.data_offsets.0;
-            let data = tensor.data().as_ref();
             self.file.seek(SeekFrom::Start(start as u64))?;
             self.file.write_all(data)?;
             self.file.flush()?;
