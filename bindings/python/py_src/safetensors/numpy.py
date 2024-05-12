@@ -178,6 +178,6 @@ def _is_little_endian(tensor: np.ndarray) -> bool:
 
 def save_tensors(tensor_dict: Dict[str, np.ndarray], filename: Union[str, os.PathLike]) -> None:
     for k, v in tensor_dict.items():
-        with safe_write(filename, framework="np") as f:
+        with safe_write(filename) as f:
             data = {"dtype": v.dtype.name, "shape": v.shape, "data": _tobytes(v)}
             f.set_tensor(k, data)

@@ -15,9 +15,10 @@ use std::fs::File;
 use std::fs::OpenOptions;
 use std::iter::FromIterator;
 use std::ops::Bound;
-use pyo3::{Bound as PyBound};
+use pyo3::Bound as PyBound;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::io::{Write, Seek, SeekFrom};
 
 static TORCH_MODULE: GILOnceCell<Py<PyModule>> = GILOnceCell::new();
 static NUMPY_MODULE: GILOnceCell<Py<PyModule>> = GILOnceCell::new();
@@ -747,12 +748,12 @@ impl safe_open {
 struct SafeWrite {
     metadata: Metadata,
     offset: usize,
-    storage: Arc<Mutex<WriteStorage>>,
+    file: File
 }
 
 impl SafeWrite {
-    fn new(filename: PathBuf, framework: Framework) -> PyResult<Self> {
-        let file = OpenOptions::new().read(true) .write(true).open(&filename).map_err(|_| {
+    fn new(filename: PathBuf) -> PyResult<Self> {
+        let file = OpenOptions::new().read(true).write(true).open(&filename).map_err(|_| {
             PyFileNotFoundError::new_err(format!("No such file or directory: {filename:?}"))
         })?;
 
@@ -766,32 +767,10 @@ impl SafeWrite {
 
         let offset = n + 8;
 
-        Python::with_gil(|py| -> PyResult<()> {
-            match framework {
-                Framework::Pytorch => {
-                    let module = PyModule::import_bound(py, intern!(py, "torch"))?;
-                    TORCH_MODULE.get_or_init(py, || module.into())
-                }
-                _ => {
-                    let module = PyModule::import_bound(py, intern!(py, "numpy"))?;
-                    NUMPY_MODULE.get_or_init(py, || module.into())
-                }
-            };
-
-            Ok(())
-        })?;
-
-        // let storage = match &framework {
-        //     Framework::Pytorch => todo!(),
-        //     _ => WriteStorage::MmapMut(buffer),
-        // };
-
-        let storage = Arc::new(Mutex::new(WriteStorage::MmapMut(buffer)));
-
         Ok(Self {
             metadata,
             offset,
-            storage,
+            file,
         })
     }
 
@@ -817,7 +796,7 @@ impl SafeWrite {
 
 
     /// Overwrite a tensor
-    pub fn set_tensor(&self, name: &str, value: &PyDict) -> PyResult<()> {
+    pub fn set_tensor(&mut self, name: &str, value: &PyDict) -> PyResult<()> {
         Python::with_gil(|_| {
             let mut shape: Option<Vec<usize>> = None;
             let mut dtype: Option<Dtype> = None;
@@ -897,14 +876,12 @@ impl SafeWrite {
             let tensor = TensorView::new(dtype, shape.clone(), data)
                 .map_err(|e| SafetensorError::new_err(format!("Error preparing tensor view: {e:?}")))?;
 
-            match &mut *self.storage.lock().unwrap() {
-                WriteStorage::MmapMut(mmap) => {
-                    let start = self.offset + info.data_offsets.0;
-                    let end = self.offset + info.data_offsets.1;
-                    mmap[start..end].copy_from_slice(tensor.data().as_ref());
-                    mmap.flush()?;
-                },
-            }
+            // overwrite tensor in file
+            let start = self.offset + info.data_offsets.0;
+            let data = tensor.data().as_ref();
+            self.file.seek(SeekFrom::Start(start as u64))?;
+            self.file.write_all(data)?;
+            self.file.flush()?;
 
             // println!("Tensor key: {}, Shape: {:?}, Dtype: {:?}", name, shape, dtype);
             // println!("Offsets: {} to {}", info.data_offsets.0, info.data_offsets.1);
@@ -924,10 +901,10 @@ struct safe_write {
 }
 
 impl safe_write {
-    fn inner(&self) -> PyResult<&SafeWrite> {
+    fn inner(&mut self) -> PyResult<&mut SafeWrite> {
         let inner = self
             .inner
-            .as_ref()
+            .as_mut()
             .ok_or_else(|| SafetensorError::new_err("File is closed".to_string()))?;
         Ok(inner)
     }
@@ -937,9 +914,9 @@ impl safe_write {
 #[pymethods]
 impl safe_write {
     #[new]
-    #[pyo3(text_signature = "(self, filename, framework)")]
-    fn new(filename: PathBuf, framework: Framework) -> PyResult<Self> {
-        let inner = Some(SafeWrite::new(filename, framework)?);
+    #[pyo3(text_signature = "(self, filename)")]
+    fn new(filename: PathBuf) -> PyResult<Self> {
+        let inner = Some(SafeWrite::new(filename)?);
         Ok(Self { inner })
     }
 
@@ -948,7 +925,7 @@ impl safe_write {
     /// Returns:
     ///     (`Dict[str, str]`):
     ///         The freeform metadata.
-    pub fn metadata(&self) -> PyResult<Option<HashMap<String, String>>> {
+    pub fn metadata(&mut self) -> PyResult<Option<HashMap<String, String>>> {
         Ok(self.inner()?.metadata())
     }
 
@@ -957,7 +934,7 @@ impl safe_write {
     /// Returns:
     ///     (`List[str]`):
     ///         The name of the tensors contained in that file
-    pub fn keys(&self) -> PyResult<Vec<String>> {
+    pub fn keys(&mut self) -> PyResult<Vec<String>> {
         self.inner()?.keys()
     }
 
@@ -979,7 +956,7 @@ impl safe_write {
     ///     tensor = f.get_tensor("embedding")
     ///
     /// ```
-    pub fn set_tensor(&self, name: &str, val: &PyDict) -> PyResult<()> {
+    pub fn set_tensor(&mut self, name: &str, val: &PyDict) -> PyResult<()> {
         self.inner()?.set_tensor(name, val)
     }
 

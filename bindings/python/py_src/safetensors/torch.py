@@ -496,6 +496,6 @@ def _flatten(tensors: Dict[str, torch.Tensor]) -> Dict[str, Dict[str, Any]]:
 
 def save_tensors(tensor_dict: Dict[str, torch.Tensor], filename: Union[str, os.PathLike]) -> None:
     for k, v in tensor_dict.items():
-        with safe_write(filename, framework="pt") as f:
+        with safe_write(filename) as f:
             data = {"dtype": str(v.dtype).split(".")[-1], "shape": v.shape, "data": _tobytes(v, k)}
             f.set_tensor(k, data)
