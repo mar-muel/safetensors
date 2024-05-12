@@ -324,10 +324,6 @@ enum Storage {
     TorchStorage(GILOnceCell<PyObject>),
 }
 
-enum WriteStorage {
-    MmapMut(MmapMut),
-}
-
 
 #[derive(Debug, PartialEq, Eq, PartialOrd)]
 struct Version {
