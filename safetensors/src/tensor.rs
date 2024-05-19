@@ -536,6 +536,11 @@ impl Metadata {
     pub fn metadata(&self) -> &Option<HashMap<String, String>> {
         &self.metadata
     }
+
+    /// Public setter method for metadata
+    pub fn set_metadata(&mut self, metadata: Option<HashMap<String, String>>) {
+        self.metadata = metadata
+    }
 }
 
 /// A view of a Tensor within the file.

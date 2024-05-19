@@ -755,7 +755,7 @@ impl SafeWrite {
 
         // SAFETY: Mmap is used to prevent allocating in Rust
         // before making a copy within Python.
-        let buffer = unsafe { MmapOptions::new().map_mut(&file)? };
+        let buffer = unsafe { MmapOptions::new().map(&file)? };
 
         let (n, metadata) = SafeTensors::read_metadata(&buffer).map_err(|e| {
             SafetensorError::new_err(format!("Error while deserializing header: {e:?}"))
@@ -790,6 +790,41 @@ impl SafeWrite {
         Ok(keys)
     }
 
+    /// Overwrite a metdata
+    pub fn set_metadata(&mut self, metadata: Option<HashMap<String, String>>) -> PyResult<()> {
+        // validate length
+        let mut new_metadata = self.metadata.clone();
+        new_metadata.set_metadata(metadata);
+        let mut metadata_buf = serde_json::to_string(&new_metadata)
+                           .map_err(|e| SafetensorError::new_err(format!("Error while serializing metadata: {e:?}")))?
+                           .into_bytes();
+        let extra = (8 - metadata_buf.len() % 8) % 8;
+        metadata_buf.extend(vec![b' '; extra]);
+        let new_offset = metadata_buf.len() + 8;
+        if new_offset != self.offset {
+            return Err(
+                SafetensorError::new_err(
+                    format!(
+                        "Provided metadata yields different offset (={new_offset}) than current metadata offset (={offset})",
+                        offset=self.offset
+                        )
+                    )
+                );
+        } else {
+            println!("new offset {new_offset} is equal to old one!")
+        }
+
+        // overwrite members
+        self.offset = new_offset;
+        self.metadata = new_metadata;
+
+        // write to file
+        self.file.seek(SeekFrom::Start(8))?;
+        self.file.write_all(&metadata_buf[..])?;
+        self.file.flush()?;
+
+        Ok(())
+    }
 
     /// Overwrite a tensor
     pub fn set_tensor(&mut self, name: &str, value: &PyDict) -> PyResult<()> {
@@ -948,6 +983,10 @@ impl safe_write {
     ///     tensor = f.get_tensor("embedding")
     ///
     /// ```
+    pub fn set_metadata(&mut self, metadata: Option<HashMap<String, String>>) -> PyResult<()> {
+        self.inner()?.set_metadata(metadata)
+    }
+
     pub fn set_tensor(&mut self, name: &str, val: &PyDict) -> PyResult<()> {
         self.inner()?.set_tensor(name, val)
     }
